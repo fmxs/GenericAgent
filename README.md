@@ -9,6 +9,8 @@
   <a href="#english">English</a> | <a href="#chinese">中文</a> | 📄 Technical Report:&nbsp;<a href="https://arxiv.org/abs/2604.17091"><img src="https://img.shields.io/badge/arXiv-2604.17091-b31b1b?logo=arxiv&logoColor=white" alt="arXiv" height="18"/></a>&nbsp;<a href="assets/GenericAgent_Technical_Report.pdf"><img src="https://img.shields.io/badge/-PDF-EA4335?logo=adobeacrobatreader&logoColor=white" alt="Technical Report PDF" height="18"/></a>&nbsp;<a href="https://github.com/JinyiHan99/GA-Technical-Report"><img src="https://img.shields.io/badge/-Code%20%26%20Data-181717?logo=github&logoColor=white" alt="Experiments & Reproduction Repo" height="18"/></a> | 📘 <a href="https://datawhalechina.github.io/hello-generic-agent/">教程</a>
 </p>
 
+> 📌 **Official channel**: This GitHub repository is the sole official source for GenericAgent. We have no affiliation with any third-party website using the GenericAgent name.
+
 ---
 <a name="english"></a>
 ## 🌟 Overview
@@ -79,7 +81,7 @@ git clone https://github.com/lsdefine/GenericAgent.git
 cd GenericAgent
 
 # 2. Install minimal dependencies
-pip install streamlit pywebview
+pip install requests streamlit pywebview
 
 # 3. Configure API Key
 cp mykey_template.py mykey.py
@@ -88,6 +90,20 @@ cp mykey_template.py mykey.py
 # 4. Launch
 python launch.pyw
 ```
+
+#### Method 2: uv (for experienced Python users)
+
+If you prefer a modern Python workflow, GenericAgent also provides a minimal `pyproject.toml`:
+
+```bash
+git clone https://github.com/lsdefine/GenericAgent.git
+cd GenericAgent
+uv pip install -e ".[ui]"        # Core + GUI dependencies
+cp mykey_template.py mykey.py
+python launch.pyw
+```
+
+> GenericAgent is meant to grow its environment through the Agent itself, not by pre-installing every possible package.
 
 Full guide: [GETTING_STARTED.md](GETTING_STARTED.md)
 
@@ -118,7 +134,7 @@ streamlit run frontends/stapp2.py        # Alternative Streamlit UI
 
 ### Common Chat Commands
 
-The default Streamlit desktop UI started by `python launch.pyw`, plus the QQ / Feishu / WeCom / DingTalk frontends, support these chat commands:
+The default Streamlit desktop UI started by `python launch.pyw`, plus the QQ / Telegram / Feishu / WeCom / DingTalk frontends, support these chat commands:
 
 - `/new` - start a fresh conversation and clear the current context
 - `/continue` - list recoverable conversation snapshots
@@ -191,10 +207,7 @@ You're also welcome to join our **GenericAgent Community Group** for discussion,
 <div align="center">
   <table>
     <tr>
-      <td align="center"><strong>WeChat Group 6</strong><br><img src="assets/images/wechat_group6.jpg" alt="WeChat Group 6 QR Code" width="250"/></td>
-      <td align="center"><strong>WeChat Group 8</strong><br><img src="assets/images/wechat_group8.jpg" alt="WeChat Group 8 QR Code" width="250"/></td>
-      <td align="center"><strong>WeChat Group 9</strong><br><img src="assets/images/wechat_group9.jpg" alt="WeChat Group 9 QR Code" width="250"/></td>
-      <td align="center"><strong>WeChat Group 10</strong><br><img src="assets/images/wechat_group10.jpg" alt="WeChat Group 10 QR Code" width="250"/></td>
+      <td align="center"><strong>WeChat Group 13</strong><br><img src="assets/images/wechat_group13.jpg" alt="WeChat Group 13 QR Code" width="250"/></td>
     </tr>
   </table>
 </div>
@@ -283,7 +296,7 @@ git clone https://github.com/lsdefine/GenericAgent.git
 cd GenericAgent
 
 # 2. 安装最小依赖
-pip install streamlit pywebview
+pip install requests streamlit pywebview
 
 # 3. 配置 API Key
 cp mykey_template.py mykey.py
@@ -292,6 +305,20 @@ cp mykey_template.py mykey.py
 # 4. 启动
 python launch.pyw
 ```
+
+#### 方法二：uv 快速安装（熟悉 Python 的用户）
+
+如果你习惯现代 Python 工作流，GenericAgent 也提供了一个最小化的 `pyproject.toml`：
+
+```bash
+git clone https://github.com/lsdefine/GenericAgent.git
+cd GenericAgent
+uv pip install -e ".[ui]"        # 核心 + GUI 依赖
+cp mykey_template.py mykey.py
+python launch.pyw
+```
+
+> GenericAgent 更推荐由 Agent 在使用中自举环境，而不是预先手动装完整依赖。
 
 完整引导流程见 [GETTING_STARTED.md](GETTING_STARTED.md)。
 
@@ -394,7 +421,7 @@ streamlit run frontends/stapp2.py        # 另一种 Streamlit 风格 UI
 
 ### 通用聊天命令
 
-默认通过 `python launch.pyw` 启动的 Streamlit 桌面 UI，以及 QQ / 飞书 / 企业微信 / 钉钉前端，都支持以下命令：
+默认通过 `python launch.pyw` 启动的 Streamlit 桌面 UI，以及 QQ / Telegram / 飞书 / 企业微信 / 钉钉前端，都支持以下命令：
 
 - `/new` - 开启新对话并清空当前上下文
 - `/continue` - 列出可恢复会话快照
@@ -465,10 +492,7 @@ GenericAgent 通过**分层记忆 × 最小工具集 × 自主执行循环**完�
 <div align="center">
   <table>
     <tr>
-      <td align="center"><strong>微信群 6</strong><br><img src="assets/images/wechat_group6.jpg" alt="微信群 6 二维码" width="250"/></td>
-      <td align="center"><strong>微信群 8</strong><br><img src="assets/images/wechat_group8.jpg" alt="微信群 8 二维码" width="250"/></td>
-      <td align="center"><strong>微信群 9</strong><br><img src="assets/images/wechat_group9.jpg" alt="微信群 9 二维码" width="250"/></td>
-      <td align="center"><strong>微信群 10</strong><br><img src="assets/images/wechat_group10.jpg" alt="微信群 10 二维码" width="250"/></td>
+      <td align="center"><strong>微信群 13</strong><br><img src="assets/images/wechat_group13.jpg" alt="微信群 13 二维码" width="250"/></td>
     </tr>
   </table>
 </div>

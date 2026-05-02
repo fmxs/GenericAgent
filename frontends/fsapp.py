@@ -8,6 +8,7 @@ from frontends.chatapp_common import format_restore
 from frontends.continue_cmd import handle_frontend_command as handle_continue_frontend, reset_conversation
 from llmcore import mykeys
 
+import traceback
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 
@@ -33,10 +34,13 @@ MEDIA_DIR = os.path.join(TEMP_DIR, "feishu_media")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 
+_TRUNC_TAIL = 300  # 截断兜底时保留原文尾部字符数
+
+
 def _clean(text):
     for pat in _TAG_PATS:
-        text = re.sub(pat, "", text, flags=re.DOTALL)
-    return re.sub(r"\n{3,}", "\n\n", text).strip() or "..."
+        text = re.sub(pat, "", text or "", flags=re.DOTALL)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _extract_files(text):
@@ -48,7 +52,11 @@ def _strip_files(text):
 
 
 def _display_text(text):
-    return _strip_files(_clean(text)) or "..."
+    cleaned = _strip_files(_clean(text))
+    if cleaned:
+        return cleaned
+    tail = (text or "").strip()[-_TRUNC_TAIL:]
+    return "⚠️ 模型输出被截断或为空" + (f"\n…{tail}" if tail else "")
 
 
 def _to_allowed_set(value):
@@ -225,6 +233,7 @@ APP_ID = str(mykeys.get("fs_app_id", "") or "").strip()
 APP_SECRET = str(mykeys.get("fs_app_secret", "") or "").strip()
 ALLOWED_USERS = _to_allowed_set(mykeys.get("fs_allowed_users", []))
 PUBLIC_ACCESS = not ALLOWED_USERS or "*" in ALLOWED_USERS
+AGENT_TIMEOUT_SEC = 900
 
 agent = GeneraticAgent()
 threading.Thread(target=agent.run, daemon=True).start()
@@ -235,35 +244,54 @@ def create_client():
     return lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).log_level(lark.LogLevel.INFO).build()
 
 
+def _card_raw(elements):
+    return json.dumps({
+        "schema": "2.0",
+        "config": {"streaming_mode": False, "width_mode": "fill"},
+        "body": {"elements": elements},
+    }, ensure_ascii=False)
+
+
 def _card(text):
-    return json.dumps({"config": {"wide_screen_mode": True}, "elements": [{"tag": "markdown", "content": text}]}, ensure_ascii=False)
+    return _card_raw([{"tag": "markdown", "content": text}])
+
+
+def _send_raw(receive_id, payload, msg_type, rtype):
+    body = CreateMessageRequest.builder().receive_id_type(rtype).request_body(
+        CreateMessageRequestBody.builder().receive_id(receive_id).msg_type(msg_type).content(payload).build()
+    ).build()
+    r = client.im.v1.message.create(body)
+    if r.success():
+        return r.data.message_id if r.data else None
+    print(f"发送失败: {r.code}, {r.msg}")
+    return None
+
+
+def _patch_card(message_id, card_json):
+    return _patch_card_result(message_id, card_json)[0]
+
+
+def _patch_card_result(message_id, card_json):
+    body = PatchMessageRequest.builder().message_id(message_id).request_body(
+        PatchMessageRequestBody.builder().content(card_json).build()
+    ).build()
+    r = client.im.v1.message.patch(body)
+    if not r.success():
+        print(f"[ERROR] patch_card 失败: {r.code}, {r.msg}")
+    msg = f"{getattr(r, 'code', '')} {getattr(r, 'msg', '')}".lower()
+    return r.success(), ("230099" in msg or "11310" in msg or "element exceeds the limit" in msg)
 
 
 def send_message(receive_id, content, msg_type="text", use_card=False, receive_id_type="open_id"):
     if use_card:
-        payload, real_type = _card(content), "interactive"
-    elif msg_type == "text":
-        payload, real_type = json.dumps({"text": content}, ensure_ascii=False), "text"
-    else:
-        payload, real_type = content, msg_type
-    body = CreateMessageRequest.builder().receive_id_type(receive_id_type).request_body(
-        CreateMessageRequestBody.builder().receive_id(receive_id).msg_type(real_type).content(payload).build()
-    ).build()
-    response = client.im.v1.message.create(body)
-    if response.success():
-        return response.data.message_id if response.data else None
-    print(f"发送失败: {response.code}, {response.msg}")
-    return None
+        return _send_raw(receive_id, _card(content), "interactive", receive_id_type)
+    if msg_type == "text":
+        return _send_raw(receive_id, json.dumps({"text": content}, ensure_ascii=False), "text", receive_id_type)
+    return _send_raw(receive_id, content, msg_type, receive_id_type)
 
 
 def update_message(message_id, content):
-    body = PatchMessageRequest.builder().message_id(message_id).request_body(
-        PatchMessageRequestBody.builder().content(_card(content)).build()
-    ).build()
-    response = client.im.v1.message.patch(body)
-    if not response.success():
-        print(f"[ERROR] update_message 失败: {response.code}, {response.msg}")
-    return response.success()
+    return _patch_card(message_id, _card(content))
 
 
 def _upload_image_sync(file_path):
@@ -421,6 +449,131 @@ def _build_user_message(message):
     return "\n".join([p for p in parts if p]).strip(), image_paths
 
 
+def _fmt_tool_call(tc):
+    name = tc.get('tool_name', '?')
+    args = {k: v for k, v in (tc.get('args') or {}).items() if not k.startswith('_')}
+    return f"- `{name}`({json.dumps(args, ensure_ascii=False)[:200]})"
+
+
+def _build_step_detail(resp, tool_calls):
+    """从 LLM response + tool_calls 组装单步展开详情（纯函数）。"""
+    parts = []
+    thinking = (getattr(resp, 'thinking', '') or '').strip() if resp else ''
+    if thinking:
+        parts.append(f"### 💭 Thinking\n{thinking}")
+    if tool_calls:
+        parts.append("### 🛠 Tool Calls\n" + "\n".join(_fmt_tool_call(tc) for tc in tool_calls))
+    content = _display_text((getattr(resp, 'content', '') or '')).strip() if resp else ''
+    if content and content != '...':
+        parts.append(f"### 📝 Output\n{content}")
+    return "\n\n".join(parts)
+
+
+class _TaskCard:
+    """飞书任务卡片：单卡片持续 patch；每步一个独立折叠面板（header 显示 summary，展开看详情）。"""
+    _DETAIL_LIMIT = 8000
+    _FINAL_LIMIT = 6000
+
+    def __init__(self, receive_id, rid_type):
+        self.rid, self.rtype = receive_id, rid_type
+        self.steps = []          # [(summary, detail), ...]
+        self.status = "🤔 思考中..."
+        self.final = None
+        self.msg_id = None
+        self.page_no = 1
+        self.turn_no = 0
+        self.turn_base = 1
+        self.note = None
+
+    def _step_panel(self, idx, summary, detail):
+        detail = detail or "_(无输出)_"
+        if len(detail) > self._DETAIL_LIMIT:
+            detail = detail[:self._DETAIL_LIMIT] + f"\n\n…(已截断,共 {len(detail)} 字符)"
+        return {
+            "tag": "collapsible_panel", "expanded": False,
+            "header": {"title": {"tag": "plain_text", "content": f"Turn {idx} · {summary}"}},
+            "elements": [{"tag": "markdown", "content": detail}],
+        }
+
+    def _build(self):
+        header = f"**{self.status}**"
+        if self.page_no > 1:
+            header += f"\n\n📄 工作卡片 {self.page_no}"
+        els = [{"tag": "markdown", "content": header}]
+        if self.note:
+            els.append({"tag": "markdown", "content": self.note})
+        for i, (s, d) in enumerate(self.steps, self.turn_base):
+            els.append(self._step_panel(i, s, d))
+        if self.final:
+            els += [{"tag": "hr"}, {"tag": "markdown", "content": self.final}]
+        return _card_raw(els)
+
+    def _push(self):
+        card = self._build()
+        if self.msg_id:
+            return _patch_card_result(self.msg_id, card)
+        else:
+            self.msg_id = _send_raw(self.rid, card, "interactive", self.rtype)
+            return bool(self.msg_id), False
+
+    def _rollover(self):
+        self.page_no += 1
+        self.msg_id = None
+        self.final = None
+        self.note = "⚠️ 上一张工作卡片达到飞书限制，本页继续展示后续进展。"
+
+    # ── 公开接口 ──
+
+    def start(self):
+        self._push()
+
+    def step(self, summary, detail=""):
+        self.turn_no += 1
+        step = (summary, detail)
+        self.steps.append(step)
+        self.status = f"⏳ 工作中 · Turn {self.turn_no}"
+        ok, limit = self._push()
+        if limit:
+            self.steps.pop()
+            self._rollover()
+            self.turn_base = self.turn_no
+            self.steps = [step]
+            self._push()
+
+    def done(self, text):
+        self.status = "✅ 已完成"
+        self.final = (text or "_(无文本输出)_")[:self._FINAL_LIMIT]
+        ok, limit = self._push()
+        if limit:
+            self._rollover()
+            self.steps = []
+            self.turn_base = self.turn_no + 1
+            self.final = (text or "_(无文本输出)_")[:self._FINAL_LIMIT]
+            self._push()
+
+    def fail(self, msg):
+        self.status = f"❌ {msg}"
+        self._push()
+
+
+def _make_task_hook(card, done_event, on_final):
+    """飞书任务 hook：每轮 patch 卡片状态；结束触发 on_final(raw) 处理附件。"""
+    def hook(ctx):
+        try:
+            if ctx.get('exit_reason'):
+                resp = ctx.get('response')
+                raw = resp.content if hasattr(resp, 'content') else str(resp)
+                card.done(_display_text(raw))
+                on_final(raw)
+                done_event.set()
+            elif ctx.get('summary'):
+                detail = _build_step_detail(ctx.get('response'), ctx.get('tool_calls') or [])
+                card.step(ctx['summary'], detail)
+        except Exception as e:
+            print(f"[fs hook] error: {e}")
+    return hook
+
+
 def handle_message(data):
     event, message, sender = data.event, data.event.message, data.event.sender
     open_id = sender.sender_id.open_id
@@ -441,57 +594,32 @@ def handle_message(data):
 
     def run_agent():
         user_tasks[open_id] = {"running": True}
+        receive_id = chat_id or open_id
+        rid_type = "chat_id" if chat_id else "open_id"
+        done_event = threading.Event()
+        hook_key = f"fs_{open_id}"
+        card = _TaskCard(receive_id, rid_type)
+        card.start()
+        on_final = lambda raw: _send_generated_files(receive_id, raw, receive_id_type=rid_type)
+        if not hasattr(agent, '_turn_end_hooks'): agent._turn_end_hooks = {}
+        agent._turn_end_hooks[hook_key] = _make_task_hook(card, done_event, on_final)
         try:
-            if chat_id:
-                msg_id, dq, last_text = send_message(chat_id, "思考中...", use_card=True, receive_id_type="chat_id"), agent.put_task(user_input, source="feishu", images=image_paths), ""
-            else:
-                msg_id, dq, last_text = send_message(open_id, "思考中...", use_card=True), agent.put_task(user_input, source="feishu", images=image_paths), ""
-            while user_tasks.get(open_id, {}).get("running", False):
-                time.sleep(3)
-                item = None
-                try:
-                    while True:
-                        item = dq.get_nowait()
-                except Exception:
-                    pass
-                if item is None:
-                    continue
-                raw = item.get("done") or item.get("next", "")
-                done = "done" in item
-                show = _display_text(raw)
-                if len(show) > 3500:
-                    cut = show[-3000:]
-                    if cut.count("```") % 2 == 1:
-                        cut = "```\n" + cut
-                    if chat_id:
-                        msg_id, last_text, show = send_message(chat_id, "(继续...)", use_card=True, receive_id_type="chat_id"), "", cut
-                    else:
-                        msg_id, last_text, show = send_message(open_id, "(继续...)", use_card=True), "", cut
-                display = show if done else show + " ⏳"
-                if display != last_text and msg_id:
-                    update_message(msg_id, display)
-                    last_text = display
-                if done:
-                    if chat_id:
-                        _send_generated_files(chat_id, raw, receive_id_type="chat_id")
-                    else:
-                        _send_generated_files(open_id, raw)
+            agent.put_task(user_input, source="feishu", images=image_paths)
+            start = time.time()
+            while not done_event.wait(timeout=3):
+                if not user_tasks.get(open_id, {}).get("running", True):
+                    agent.abort()
+                    card.fail("已停止")
                     break
-            if not user_tasks.get(open_id, {}).get("running", True):
-                if chat_id:
-                    send_message(chat_id, "已停止", receive_id_type="chat_id")
-                else:
-                    send_message(open_id, "已停止")
+                if time.time() - start > AGENT_TIMEOUT_SEC:
+                    agent.abort()
+                    card.fail("任务超时")
+                    break
         except Exception as e:
-            import traceback
-
-            print(f"[ERROR] run_agent 异常: {e}")
             traceback.print_exc()
-            if chat_id:
-                send_message(chat_id, f"错误: {str(e)}", receive_id_type="chat_id")
-            else:
-                send_message(open_id, f"错误: {str(e)}")
+            card.fail(f"错误: {e}")
         finally:
+            agent._turn_end_hooks.pop(hook_key, None)
             user_tasks.pop(open_id, None)
 
     threading.Thread(target=run_agent, daemon=True).start()
@@ -503,18 +631,32 @@ def handle_command(open_id, cmd, chat_id=None):
             send_message(chat_id, content, receive_id_type="chat_id")
         else:
             send_message(open_id, content)
-    if cmd == "/stop":
+    parts = (cmd or "").split()
+    op = (parts[0] if parts else "").lower()
+    if op == "/stop":
         if open_id in user_tasks:
             user_tasks[open_id]["running"] = False
         agent.abort()
         _send_cmd_response("正在停止...")
-    elif cmd == "/new":
+    elif op == "/new":
         _send_cmd_response(reset_conversation(agent))
-    elif cmd == "/help":
-        _send_cmd_response("命令列表:\n/stop - 停止当前任务\n/status - 查看状态\n/restore - 恢复上次对话历史\n/continue - 列出可恢复会话\n/continue [n] - 恢复第 n 个会话\n/new - 开启新对话并清空当前上下文\n/help - 显示帮助")
-    elif cmd == "/status":
-        _send_cmd_response(f"状态: {'空闲' if not agent.is_running else '运行中'}")
-    elif cmd == "/restore":
+    elif op == "/help":
+        _send_cmd_response("命令列表:\n/stop - 停止当前任务\n/status - 查看状态\n/llm - 查看当前模型列表\n/llm [n] - 切换到第 n 个模型\n/restore - 恢复上次对话历史\n/continue - 列出可恢复会话\n/continue [n] - 恢复第 n 个会话\n/new - 开启新对话并清空当前上下文\n/help - 显示帮助")
+    elif op == "/status":
+        llm = agent.get_llm_name() if agent.llmclient else "未配置"
+        _send_cmd_response(f"状态: {'🔴 运行中' if agent.is_running else '🟢 空闲'}\nLLM: [{agent.llm_no}] {llm}")
+    elif op == "/llm":
+        if not agent.llmclient:
+            return _send_cmd_response("❌ 当前没有可用的 LLM 配置")
+        if len(parts) > 1:
+            try:
+                agent.next_llm(int(parts[1]))
+                return _send_cmd_response(f"✅ 已切换到 [{agent.llm_no}] {agent.get_llm_name()}")
+            except Exception:
+                return _send_cmd_response(f"用法: /llm <0-{len(agent.list_llms()) - 1}>")
+        lines = [f"{'→' if cur else '  '} [{i}] {name}" for i, name, cur in agent.list_llms()]
+        _send_cmd_response("LLMs:\n" + "\n".join(lines))
+    elif op == "/restore":
         try:
             restored_info, err = format_restore()
             if err:
@@ -525,7 +667,7 @@ def handle_command(open_id, cmd, chat_id=None):
             _send_cmd_response(f"已恢复 {count} 轮对话\n来源: {fname}\n(仅恢复上下文，请输入新问题继续)")
         except Exception as e:
             _send_cmd_response(f"恢复失败: {e}")
-    elif cmd.startswith("/continue"):
+    elif op == "/continue" or cmd.startswith("/continue"):
         _send_cmd_response(handle_continue_frontend(agent, cmd))
     else:
         _send_cmd_response(f"未知命令: {cmd}")
